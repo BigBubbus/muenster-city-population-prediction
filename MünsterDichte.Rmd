@@ -1,0 +1,112 @@
+---
+title: "Population density of Münster with a small regression model to predict the future"
+output: html_notebook
+---
+
+Easy regression problem for the population density in Münster, Germany. The goal is to load data from a publicly accessable pdf file and predict the future population of the city.
+
+# Installation
+```{r}
+# install our package manager to online all our dependencies
+if (!require("pacman")) install.packages("pacman"); library(pacman)
+pacman::p_load(pdftools, stringr, ggplot2, reshape2, mice)
+```
+
+# Load Data
+
+Next we load the PDF and extract the lines of importance to us.
+
+```{r}
+pdfTablePageForAllYears <- pdf_text("https://www.stadt-muenster.de/fileadmin//user_upload/stadt-muenster/61_stadtentwicklung/pdf/jahr/Jahres-Statistik_2016_Bevoelkerung.pdf","./71_PV.62.pdf")[14]
+sampleLineSplit <- strsplit(pdfTablePageForAllYears, "\r\n")
+# Format is in a list, so we first access list index and lines afterwards
+filterRelevantLines <- sampleLineSplit[[1]][8:52]
+head(filterRelevantLines, n = 2)
+tail(filterRelevantLines, n = 2)
+```
+
+# Preprocessing
+
+We have a small problem with numbers, since there is a whitespace in the population number, lets clean that up first. Afterwards we create clean strings in a vector of year and populationnumber.
+
+```{r}
+populationToNumber <- str_replace_all(filterRelevantLines, "(\\d{2,3}) (\\d{3})", "\\1\\2")
+head(populationToNumber, n = 4)
+# Match 4 Digits with an optional * for merged years, 0 to x whitespaces and then either a . or a population number.
+yearAndPopulationExtract <- unlist(str_extract_all(populationToNumber,"\\d{4}\\*?\\s+(\\d{5,6})?\\.?"))
+head(yearAndPopulationExtract, n = 4)
+```
+
+Now, on to create a dataframe, this means preprocessing our data even further into year|population, since we have a bonus condition "Eingemeindungen" (merging of communities) we want to use that as well, which is why we create one more column "merged".
+
+```{r}
+years = as.integer(c())
+population = as.integer(c())
+merged = c()
+# Write data into empty vectors
+for(data in yearAndPopulationExtract){
+  if (grepl("\\*", data)){
+    merged <- c(merged,T)
+  } else {
+    merged <- c(merged,F)
+  }
+  splitYearsAndPop <- unlist(strsplit(data,"\\*?\\s+"))
+  years <- c(years,splitYearsAndPop[1])
+  population <- c(population,splitYearsAndPop[2])
+}
+stopifnot(length(years) == length(merged) && length(merged) == length(population))
+allDataInFrame <- data.frame(years,population,merged)
+allDataInFrame <- allDataInFrame[order(years),] 
+# check the table
+knitr::kable(allDataInFrame[1:5,], caption = "A Knitr table.", floating.environment="sidewaystable" )
+```
+
+We now have a few characters of "." in our data, lets make it so that they are NA.
+
+```{r}
+allDataInFrame[allDataInFrame=="."]<-NA
+knitr::kable(allDataInFrame[1:5,], caption = "A Knitr table.", floating.environment="sidewaystable" )
+```
+
+Now, we train a linear model to impute the missing values. We remove the last line since we want to predict the future later on.
+
+```{r}
+sapply(allDataInFrame, class)
+# years and population are of type factor, which is why we use this workaround
+allDataInFrame$years <- as.integer(as.character(allDataInFrame$years))
+allDataInFrame$population <- as.integer(as.character(allDataInFrame$population))
+allDataInFrameWithoutLastRow <- allDataInFrame[-nrow(allDataInFrame),]
+# impute using mice, data looks weird for 1873, but we'll take it...
+imp <- mice(allDataInFrameWithoutLastRow, method = "pmm", m = 1, maxit = 50)
+allDataInFrameWithoutLastRow <- complete(imp)
+allDataInFrameWithoutLastRow$years <- as.integer(as.character(allDataInFrameWithoutLastRow$years))
+allDataInFrameWithoutLastRow$population <- as.integer(as.character(allDataInFrameWithoutLastRow$population))
+```
+
+# Tests
+
+# Visualization
+
+Now lets plot, whatever we did here.
+
+```{r}
+scatter.smooth(x=allDataInFrameWithoutLastRow$years, y=allDataInFrameWithoutLastRow$population, main="Münster Population Over Time") 
+```
+
+Quite some outliers, interesting to see, how much damage second world war did, while the first world war didn't seem to have any significance.
+
+We won't do any evaluation on the model we're building, let's just see what happens, if we want to predict years 2016-2025.
+
+
+```{r}
+predictionFrame <- data.frame("years" = 1812:2012, "population" = 0)
+lmMod <- lm(population ~ poly(years,3), data=allDataInFrameWithoutLastRow)  # build the model
+predictionFrame$population = predict(lmMod, predictionFrame) 
+plot(allDataInFrameWithoutLastRow$years,allDataInFrameWithoutLastRow$population,type='l',col='navy',main='Nonlinear relationship',lwd=5)
+lines(predictionFrame$years, predictionFrame$population,col='red',lwd=5)
+```
+
+Not too bad, looks alright for now, we have to test some parameters like the AUC to optimize the model.
+
+
+
